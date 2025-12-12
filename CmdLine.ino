@@ -2,6 +2,7 @@ void printUsage() {
   Serial.println(F("Comandi disponibili:")); 
   Serial.println(F("SENSOR <ioPin>: Imposta ioPin come un SENSORE"));
   Serial.println(F("SENSORTOF <ioPin>: Imposta ioPin come un SENSORE ToF")); 
+  Serial.println(F("SENSORIR <ioPin>: Imposta l'IR RX sull'ioPin (solo 8 ammesso)"));
   Serial.println(F("MSENSOR <ioPin>: Imposta ioPin come un SENSORE MOMENTANEO"));  
   Serial.println(F("ABILITA <ioPin>: Abilita ioPin"));  
   Serial.println(F("DISABILITA <ioPin>: Disabilita ioPin"));    
@@ -55,7 +56,28 @@ void parseCmdLine() {
       sensorInfo[ioPin - 1].deviceType = DEV_SENSORTOF;
       LocoNetSV.writeSVStorage(pincv, DEV_SENSORTOF);
       //saveConfigToEEPROM();
-    }    
+    }
+  }
+
+  // SENSOR IR
+  else if(strcmp(command, "SENSORIR") == 0) {
+
+    int ioPin = atoi(strtok(NULL, " "));
+    if(ioPin < 1 || ioPin > IOPINS) {
+      Serial.print(F("Invalid ioPin: "));
+      Serial.println(ioPin);
+      Serial.println();
+    }
+    else if (ioPin != IR_UNIT_IO) {
+      Serial.println(F("Il sensore IR può essere configurato solo sul canale 8: comando ignorato."));
+      Serial.println();
+    }
+    else {
+      uint8_t pincv = ((ioPin-1) * 4) + 21;
+      sensorInfo[ioPin - 1].deviceType = DEV_SENSORIR;
+      LocoNetSV.writeSVStorage(pincv, DEV_SENSORIR);
+      //saveConfigToEEPROM();
+    }
   }
 
   // MSENSOR
