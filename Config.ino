@@ -93,35 +93,35 @@ void setFactoryDefault() {
   EEPROM.put(SV_ADDR_SENSOR1_LNADR-2, address + 1);
   EEPROM.put(SV_ADDR_SENSOR1_TYPE-2, DEV_SENSOR);
   EEPROM.put(SV_ADDR_SENSOR1_SENSDISTANCE-2, 50);
-  EEPROM.put(SV_ADDR_SENSOR1_ENABLED-2, 1);
+  EEPROM.put(SV_ADDR_SENSOR1_ENABLED-2, 0);
   EEPROM.put(SV_ADDR_SENSOR2_LNADR-2, address + 2);
   EEPROM.put(SV_ADDR_SENSOR2_TYPE-2, DEV_SENSOR);
   EEPROM.put(SV_ADDR_SENSOR2_SENSDISTANCE-2, 50);
-  EEPROM.put(SV_ADDR_SENSOR2_ENABLED-2, 1);
+  EEPROM.put(SV_ADDR_SENSOR2_ENABLED-2, 0);
   EEPROM.put(SV_ADDR_SENSOR3_LNADR-2, address + 3);
   EEPROM.put(SV_ADDR_SENSOR3_TYPE-2, DEV_SENSOR);
   EEPROM.put(SV_ADDR_SENSOR3_SENSDISTANCE-2, 50);
-  EEPROM.put(SV_ADDR_SENSOR3_ENABLED-2, 1);
+  EEPROM.put(SV_ADDR_SENSOR3_ENABLED-2, 0);
   EEPROM.put(SV_ADDR_SENSOR4_LNADR-2, address + 4);
   EEPROM.put(SV_ADDR_SENSOR4_TYPE-2, DEV_SENSOR);
   EEPROM.put(SV_ADDR_SENSOR4_SENSDISTANCE-2, 50);
-  EEPROM.put(SV_ADDR_SENSOR4_ENABLED-2, 1);
+  EEPROM.put(SV_ADDR_SENSOR4_ENABLED-2, 0);
   EEPROM.put(SV_ADDR_SENSOR5_LNADR-2, address + 5);
   EEPROM.put(SV_ADDR_SENSOR5_TYPE-2, DEV_SENSOR);
   EEPROM.put(SV_ADDR_SENSOR5_SENSDISTANCE-2, 50);
-  EEPROM.put(SV_ADDR_SENSOR5_ENABLED-2, 1);
+  EEPROM.put(SV_ADDR_SENSOR5_ENABLED-2, 0);
   EEPROM.put(SV_ADDR_SENSOR6_LNADR-2, address + 6);
   EEPROM.put(SV_ADDR_SENSOR6_TYPE-2, DEV_SENSOR);
   EEPROM.put(SV_ADDR_SENSOR6_SENSDISTANCE-2, 50);
-  EEPROM.put(SV_ADDR_SENSOR6_ENABLED-2, 1);
+  EEPROM.put(SV_ADDR_SENSOR6_ENABLED-2, 0);
   EEPROM.put(SV_ADDR_SENSOR7_LNADR-2, address + 7);
   EEPROM.put(SV_ADDR_SENSOR7_TYPE-2, DEV_SENSOR);
   EEPROM.put(SV_ADDR_SENSOR7_SENSDISTANCE-2, 50);
-  EEPROM.put(SV_ADDR_SENSOR7_ENABLED-2, 1);
+  EEPROM.put(SV_ADDR_SENSOR7_ENABLED-2, 0);
   EEPROM.put(SV_ADDR_SENSOR8_LNADR-2, address + 8);
   EEPROM.put(SV_ADDR_SENSOR8_TYPE-2, DEV_SENSOR);
   EEPROM.put(SV_ADDR_SENSOR8_SENSDISTANCE-2, 50);
-  EEPROM.put(SV_ADDR_SENSOR8_ENABLED-2, 1);
+  EEPROM.put(SV_ADDR_SENSOR8_ENABLED-2, 0);
 
   Serial.println("Reset Completato. Riavviare per applicare le modifiche!");
 
@@ -144,7 +144,7 @@ void printConfiguration() {
     else if(sensorInfo[i].deviceType == DEV_SENSORIR) Serial.print(("SENSORE IR RX"));    
     else if(sensorInfo[i].deviceType == DEV_MSENSOR) Serial.print("MSENSOR"); 
     Serial.print("  ");
-    Serial.print(("State: ")); sensorOn[i] ? Serial.print(("OFF")) : Serial.print(("ON")); Serial.print("  ");
+    Serial.print(("State: ")); isSensorOn(i) ? Serial.print(("ON")) : Serial.print(("OFF")); Serial.print("  ");
     Serial.print(("ENABLED: ")); sensorInfo[i].isEnabled ? Serial.print(("YES")) : Serial.print(("NO")); Serial.print("\n");
   }
 }
