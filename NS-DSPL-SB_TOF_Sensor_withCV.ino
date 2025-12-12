@@ -27,20 +27,12 @@ void TaskBlink1( void *pvParameters );*/
 #define DEV_SENSOR      1
 #define DEV_SENSORTOF   2
 #define DEV_MSENSOR     3
+#define DEV_SENSORIR    4
 
 #define ON_DISTANCE     50
 #define THRESHOLD       5
 
 #define STATUSLED       13
-
-const uint8_t IR_RECV_PIN = 2;   // scegli un pin libero (su AVR: D2 va benissimo)
-#define IR_UNIT_IO 3
-const uint8_t IR_UNIT_INDEX = IR_UNIT_IO - 1;
-
-#define OPC_LISSY_REP 0xE4
-uint32_t lastIrTime = 0;
-uint16_t lastLocoId = 0;
-const uint16_t IR_RETRIGGER_MS = 500;
 
 const uint8_t xshut_pins[] = {4,5,7,9,10,14,15,16}; //{4,5,7,9,10,14,15,16};
 // xshut_pins[0] -> pin X1 per sensore TOF
@@ -52,6 +44,15 @@ const uint8_t xshut_pins[] = {4,5,7,9,10,14,15,16}; //{4,5,7,9,10,14,15,16};
 // xshut_pins[6] -> pin X7 per sensore effetto HALL / TOF
 // xshut_pins[7] -> pin X8 per sensore effetto HALL / TOF
 const uint8_t pinCount = 8;
+
+const uint8_t IR_UNIT_IO = IOPINS; // l'ultimo I/O (8) è l'unico ammesso per IR RX
+const uint8_t IR_UNIT_INDEX = IR_UNIT_IO - 1;
+const uint8_t IR_RECV_PIN = xshut_pins[IR_UNIT_INDEX];
+
+#define OPC_LISSY_REP 0xE4
+uint32_t lastIrTime = 0;
+uint16_t lastLocoId = 0;
+const uint16_t IR_RETRIGGER_MS = 500;
 
 /******* Inizio Dichiarazione Indirizzo e Valori di default delle CV *******/
 
@@ -220,7 +221,11 @@ void setup() {
     // Se il pin è configurato come sensore ed è attivo
     if (sensorInfo[i].deviceType == DEV_SENSOR and sensorInfo[i].isEnabled) {
       pinMode(xshut_pins[i], INPUT);
-    }  
+    }
+    // Se il pin è configurato come sensore IR ed è attivo
+    if (sensorInfo[i].deviceType == DEV_SENSORIR and sensorInfo[i].isEnabled) {
+      pinMode(xshut_pins[i], INPUT);
+    }
   }
 
   // Enable, initialize, and start each sensor, one by one.
@@ -236,7 +241,7 @@ void setup() {
         Serial.print("!!! Impossibile inizializzare il sensore #");
         Serial.print(i+1);
         Serial.println(" !!!");
-        //failedStart = true;
+        failedStart = true;
       }
       delay(10);
       sensor[i].setAddress(0x2A + i);
@@ -253,8 +258,16 @@ void setup() {
   //vTaskStartScheduler();
 
   // IR receiver
-  IrReceiver.begin(IR_RECV_PIN, ENABLE_LED_FEEDBACK);  // LED feedback opzionale
-  Serial.println(F("IRreceiver pronto"));
+  if (sensorInfo[IR_UNIT_INDEX].deviceType == DEV_SENSORIR && sensorInfo[IR_UNIT_INDEX].isEnabled) {
+    pinMode(IR_RECV_PIN, INPUT);
+    IrReceiver.begin(IR_RECV_PIN, ENABLE_LED_FEEDBACK);  // LED feedback opzionale
+    Serial.print(F("IRreceiver pronto su I/O "));
+    Serial.println(IR_UNIT_IO);
+  } else {
+    Serial.print(F("IRreceiver non attivato: I/O "));
+    Serial.print(IR_UNIT_IO);
+    Serial.println(F(" non configurato come SENSORIR abilitato"));
+  }
 }
 
 void loop() {
@@ -488,17 +501,10 @@ void checkIRBeacons() {
 
   // Scegli a quale "unit address" associare questo IR.
   // Esempio semplice: prendi il primo sensore abilitato di tipo TOF come "punto LISSY"
-  int irIndex = -1;
-  for (int i = 0; i < pinCount; i++) {
-    if (sensorInfo[i].isEnabled && sensorInfo[i].deviceType == DEV_SENSORTOF) {
-      irIndex = i;
-      break;
-    }
-  }
-
-  if (irIndex < 0) {
+  int irIndex = IR_UNIT_INDEX;
+  if (!(sensorInfo[irIndex].isEnabled && sensorInfo[irIndex].deviceType == DEV_SENSORIR)) {
 #ifdef DEBUG
-    Serial.println(F("Nessun sensore abilitato per IR -> scarto"));
+    Serial.println(F("Sensore IR non configurato o non abilitato su I/O 8 -> scarto"));
 #endif
     IrReceiver.resume();
     return;
