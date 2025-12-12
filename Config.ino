@@ -17,6 +17,15 @@ void readConfigFromStorage() {
     sensorInfo[i].deviceType = LocoNetSV.readSVStorage(currentAddress+1);
     sensorInfo[i].sensdistance = LocoNetSV.readSVStorage(currentAddress+2);
     sensorInfo[i].isEnabled = LocoNetSV.readSVStorage(currentAddress+3);
+    if (sensorInfo[i].deviceType == DEV_SENSORIR && i != IR_UNIT_INDEX) {
+      Serial.print(F("I/O "));
+      Serial.print(i + 1);
+      Serial.println(F(" non può essere configurato come sensore IR: forzatura su DISABILITATO"));
+      sensorInfo[i].deviceType = DEV_SENSOR;
+      sensorInfo[i].isEnabled = 0;
+      LocoNetSV.writeSVStorage(currentAddress+1, DEV_SENSOR);
+      LocoNetSV.writeSVStorage(currentAddress+3, 0);
+    }
     currentAddress += sizeof(SensorInfo);
   }
 
@@ -131,7 +140,8 @@ void printConfiguration() {
     Serial.print(("Type: ")); Serial.print(("INPUT")); Serial.print("  ");
     Serial.print(("Device: ")); 
     if(sensorInfo[i].deviceType == DEV_SENSOR) Serial.print(("SENSORE")); 
-    else if(sensorInfo[i].deviceType == DEV_SENSORTOF) Serial.print(("SENSORE TOF"));    
+    else if(sensorInfo[i].deviceType == DEV_SENSORTOF) Serial.print(("SENSORE TOF"));
+    else if(sensorInfo[i].deviceType == DEV_SENSORIR) Serial.print(("SENSORE IR RX"));    
     else if(sensorInfo[i].deviceType == DEV_MSENSOR) Serial.print("MSENSOR"); 
     Serial.print("  ");
     Serial.print(("State: ")); sensorOn[i] ? Serial.print(("OFF")) : Serial.print(("ON")); Serial.print("  ");
