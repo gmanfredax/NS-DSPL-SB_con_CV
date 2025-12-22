@@ -34,7 +34,7 @@ void readConfigFromStorage() {
 
 void notifySVChanged(uint16_t Offset) {
 
-  if (Offset >= SV_ADDR_SENSOR1_LNADR and Offset <= SV_ADDR_SENSOR8_SENSDISTANCE) {
+  if (Offset >= SV_ADDR_SENSOR1_LNADR and Offset <= SV_ADDR_SENSOR8_ENABLED) {
     //sensorsNumber = LocoNetSV.readSVStorage(SV_ADDR_NUM_SENSORS) ;
     Serial.print("CV "); Serial.print(Offset); Serial.print(" aggiornata. Nuovo valore: "); Serial.println(LocoNetSV.readSVStorage(Offset));
     readConfigFromStorage();
