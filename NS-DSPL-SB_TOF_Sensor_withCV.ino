@@ -1,10 +1,10 @@
-// NS-DSPL-SB v1.3
-// Decoder DCC per 8 sensori (TOF e HALL EFFECT)
+// NS-DSPL-SB v1.2-BETA5
+// Decoder DCC per 8 sensori (TOF, HALL EFFECT e ASSORBIMENTO)
 // Configurazione tramite CV
 // NeXtorSystem 2025
 // Gabriele Manfreda
 //
-// Ultimo Aggiornamento: 23/03/2025
+// Ultimo Aggiornamento: 29/12/2025
 // Ultima modifica: Introduzione supporto sensori effetto HALL
 #include <avr/wdt.h>
 #include <VL53L0X.h>
@@ -13,11 +13,6 @@
 #include <EEPROM.h>
 #define DECODE_NEC
 #include <IRremote.hpp>
-/*#include <Arduino_FreeRTOS.h>
-
-void TaskBlink1( void *pvParameters );*/
-
-#define DEBUG 1
 
 //#define VERSION         "1.0"
 #define IOPINS          8
@@ -28,6 +23,7 @@ void TaskBlink1( void *pvParameters );*/
 #define DEV_SENSORTOF   2
 #define DEV_MSENSOR     3
 #define DEV_SENSORIR    4
+#define DEV_SENSORABS   5
 
 #define ON_DISTANCE     50
 #define THRESHOLD       5
@@ -43,22 +39,36 @@ const uint8_t xshut_pins[] = {4,5,7,9,10,14,15,16}; //{4,5,7,9,10,14,15,16};
 // xshut_pins[5] -> pin X6 per sensore effetto HALL / TOF
 // xshut_pins[6] -> pin X7 per sensore effetto HALL / TOF
 // xshut_pins[7] -> pin X8 per sensore effetto HALL / TOF
-const uint8_t pinCount = 8;
-
 const uint8_t IR_UNIT_IO = IOPINS; // l'ultimo I/O (8) è l'unico ammesso per IR RX
 const uint8_t IR_UNIT_INDEX = IR_UNIT_IO - 1;
 const uint8_t IR_RECV_PIN = xshut_pins[IR_UNIT_INDEX];
+const uint8_t SENSOR_COUNT = IOPINS;
+const uint8_t HALL_TOLERANCE = 30;
 
 #define OPC_LISSY_REP 0xE4
 uint32_t lastIrTime = 0;
 uint16_t lastLocoId = 0;
 const uint16_t IR_RETRIGGER_MS = 500;
+const uint8_t SENSOR_ON_REQUIRED_HITS = 2;
+const uint8_t SENSOR_OFF_REQUIRED_HITS = 2;
+const uint8_t HALL_REQUIRED_HITS = 2;
+const unsigned long SENSOR_INTERVAL_TOF = 60;
+const unsigned long SENSOR_INTERVAL_ANALOG = 25;
+const unsigned long SENSOR_INTERVAL_DIGITAL = 15;
+const unsigned long SENSOR_LOOP_BUDGET_US = 3500;
+const unsigned long SENSOR_MIN_INTERVAL = 50; // intervallo minimo tra due letture sullo stesso sensore
+const unsigned long SENSOR_ERROR_RETRY_MS = 1000;
+const uint16_t TOF_TIMEOUT_MS = 50;
+const uint32_t TOF_TIMING_BUDGET_US = 20000;
+const uint16_t TOF_CONTINUOUS_PERIOD_MS = 60;
 
 /******* Inizio Dichiarazione Indirizzo e Valori di default delle CV *******/
 
 // const uint16_t SV_ADDR_SW_VERSION = 2 ;       
 const uint8_t VALUE_SW_VERSION = 1 ;
-const char VALUE_SW_REV[] = "2-beta1" ;      
+const char VALUE_SW_REV[] = "2-BETA5" ;
+const char MANUFACTURER[] = "NeXtorSystem" ;
+const char ENGINEER[] = "Gabriele Manfreda" ;
 
 // const uint16_t SV_ADDR_NODE_ID_L = 3 ;  
 // const uint16_t SV_ADDR_NODE_ID_H = 4 ;   
@@ -138,6 +148,9 @@ const uint8_t SV_ADDR_SENSOR6_SENSDISTANCE = 42 ;
 const uint8_t SV_ADDR_SENSOR7_SENSDISTANCE = 46 ;
 const uint8_t SV_ADDR_SENSOR8_SENSDISTANCE = 50 ;
 
+const uint8_t SV_ADDR_DEBUG_FLAG = 100 ;
+const uint8_t VALUE_DEBUG_DEFAULT = 0 ;
+
 // address we will assign if dual sensor is present
 //#define LOX1_ADDRESS     0x30
 //#define LOX2_ADDRESS     0x31
@@ -152,7 +165,7 @@ typedef struct {
 } SensorInfo;
 
 // Variabili Globali
-VL53L0X sensor[pinCount];
+VL53L0X sensorTOF[SENSOR_COUNT];
 int hallSensorSTDVAL = 543;
 
 LocoNetSystemVariableClass LocoNetSV;
@@ -160,43 +173,146 @@ lnMsg *LnPacket;
 SV_STATUS   svStatus = SV_OK;
 boolean     deferredProcessingNeeded = false;
 
-SensorInfo sensorInfo[pinCount];
-uint8_t sensorStateMask = 0; // bitmask invece di array bool per ridurre RAM
+SensorInfo sensorInfo[SENSOR_COUNT];
+uint16_t sensorStateMask = 0; // bitmask invece di array bool per ridurre RAM
 char cmdline[CMDLINESIZE];
+bool debugEnabled = false;
 bool failedStart = false;
 uint8_t cmdlinepos = 0;
 uint8_t blinkled = 0;
 uint8_t sensorScanCursor = 0;
-unsigned long sensorNextDue[pinCount];
-const unsigned long SENSOR_MIN_INTERVAL = 50; // intervallo minimo tra due letture sullo stesso sensore
-const unsigned long SENSOR_ERROR_RETRY_MS = 1000;
+unsigned long sensorNextDue[SENSOR_COUNT];
+int8_t hallSensorLastState[SENSOR_COUNT];
+uint8_t hallCandidateState[SENSOR_COUNT];
+uint8_t hallCandidateHits[SENSOR_COUNT];
+uint8_t sensorConsecutiveOn[SENSOR_COUNT];
+uint8_t sensorConsecutiveOff[SENSOR_COUNT];
 
 inline bool isSensorOn(uint8_t idx) {
-  return sensorStateMask & (1 << idx);
+  if (idx >= 16) return false;
+  return (sensorStateMask & (uint16_t(1u) << idx)) != 0;
 }
 
 inline void setSensorState(uint8_t idx, bool on) {
-  if (on) {
-    sensorStateMask |= (1 << idx);
-  } else {
-    sensorStateMask &= ~(1 << idx);
+  if (idx >= 16) return;
+  uint16_t bit = (uint16_t(1u) << idx);
+  if (on) sensorStateMask |= bit;
+  else    sensorStateMask &= (uint16_t)~bit;
+}
+
+void configureXshutForSensor(uint8_t activeIndex) {
+  for (uint8_t pin = 0; pin < SENSOR_COUNT; ++pin) {
+    if (!(sensorInfo[pin].deviceType == DEV_SENSORTOF && sensorInfo[pin].isEnabled)) continue;
+    digitalWrite(xshut_pins[pin], pin <= activeIndex ? HIGH : LOW);
+  }
+  delay(10);
+}
+
+void publishSensorState(uint8_t index, bool active, const __FlashStringHelper *sensorName, uint16_t measurement = 0, bool includeValue = false) {
+  setSensorState(index, active);
+  LocoNet.reportSensor(sensorInfo[index].dccAddress, active ? 1 : 0);
+  if (debugEnabled) {
+    Serial.print(sensorName);
+    Serial.print(index + 1);
+    Serial.print(F(" Sent sensor state - address: "));
+    Serial.print(sensorInfo[index].dccAddress);
+    Serial.print(F(", state: "));
+    Serial.print(active ? F("ON") : F("OFF"));
+    if (includeValue) {
+      Serial.print(F(" - Valore: "));
+      Serial.print(measurement);
+    }
+    Serial.println();
   }
 }
 
-#ifdef DEBUG
-void logSensorState(uint8_t index, const __FlashStringHelper *sensorName, uint8_t address, const __FlashStringHelper *state, uint16_t measurement) {
-  Serial.print(sensorName);
-  Serial.print(index + 1);
-  Serial.print(F(" Sent sensor state - address: "));
-  Serial.print(address);
-  Serial.print(F(", state: "));
-  Serial.print(state);
-  Serial.print(F(" - Valore: "));
-  Serial.println(measurement);
+void publishHallState(uint8_t index, uint8_t state, uint16_t analogValue, const __FlashStringHelper *sensorName) {
+  hallSensorLastState[index] = state;
+  LocoNet.reportSensor(sensorInfo[index].dccAddress, state);
+  if (debugEnabled) {
+    Serial.print(sensorName);
+    Serial.print(index + 1);
+    Serial.print(F(" Sent sensor state - address: "));
+    Serial.print(sensorInfo[index].dccAddress);
+    Serial.print(F(", state: "));
+    Serial.print(state);
+    Serial.print(F(" - Valore: "));
+    Serial.println(analogValue);
+  }
 }
-#else
-inline void logSensorState(uint8_t, const __FlashStringHelper *, uint8_t, const __FlashStringHelper *, uint16_t) {}
-#endif
+
+inline bool isDue(uint32_t now, uint32_t due) {
+  return (int32_t)(now - due) >= 0;
+}
+
+unsigned long intervalForType(uint8_t deviceType) {
+  switch (deviceType) {
+    case DEV_SENSORTOF:
+      return SENSOR_INTERVAL_TOF;
+    case DEV_MSENSOR:
+    case DEV_SENSORIR:
+      return SENSOR_INTERVAL_DIGITAL;
+    case DEV_SENSOR:
+    case DEV_SENSORABS:
+      return SENSOR_INTERVAL_ANALOG;
+    default:
+      return SENSOR_MIN_INTERVAL;
+  }
+}
+
+void resetBinaryCounters(uint8_t idx) {
+  sensorConsecutiveOn[idx] = 0;
+  sensorConsecutiveOff[idx] = 0;
+}
+
+inline uint8_t cappedIncrement(uint8_t current, uint8_t limit) {
+  return (current < limit) ? (current + 1) : limit;
+}
+
+void handleBinarySensor(uint8_t index, bool candidateOn, bool candidateOff, const __FlashStringHelper *sensorName, uint16_t measurement = 0, bool includeValue = false) {
+  bool current = isSensorOn(index);
+
+  if (candidateOn) {
+    sensorConsecutiveOn[index] = cappedIncrement(sensorConsecutiveOn[index], SENSOR_ON_REQUIRED_HITS);
+    sensorConsecutiveOff[index] = 0;
+    if (!current && sensorConsecutiveOn[index] >= SENSOR_ON_REQUIRED_HITS) {
+      publishSensorState(index, true, sensorName, measurement, includeValue);
+      resetBinaryCounters(index);
+    }
+    return;
+  }
+
+  if (candidateOff) {
+    sensorConsecutiveOff[index] = cappedIncrement(sensorConsecutiveOff[index], SENSOR_OFF_REQUIRED_HITS);
+    sensorConsecutiveOn[index] = 0;
+    if (current && sensorConsecutiveOff[index] >= SENSOR_OFF_REQUIRED_HITS) {
+      publishSensorState(index, false, sensorName, measurement, includeValue);
+      resetBinaryCounters(index);
+    }
+    return;
+  }
+
+  resetBinaryCounters(index);
+}
+
+void handleHallState(uint8_t index, uint8_t candidateState, uint16_t analogValue, const __FlashStringHelper *sensorName) {
+  if (candidateState == hallSensorLastState[index]) {
+    hallCandidateHits[index] = 0;
+    return;
+  }
+
+  if (candidateState == hallCandidateState[index]) {
+    hallCandidateHits[index] = cappedIncrement(hallCandidateHits[index], HALL_REQUIRED_HITS);
+  } else {
+    hallCandidateState[index] = candidateState;
+    hallCandidateHits[index] = 1;
+  }
+
+  if (hallCandidateHits[index] >= HALL_REQUIRED_HITS) {
+    publishHallState(index, candidateState, analogValue, sensorName);
+    hallCandidateHits[index] = 0;
+  }
+}
 
 void setup() {
   delay(2500);
@@ -212,15 +328,23 @@ void setup() {
   Serial.println(VALUE_SW_REV);
   Serial.print(F("Data Revisione: "));
   Serial.println(F(__DATE__));
+  Serial.print(F("Produttore: "));
+  Serial.println(MANUFACTURER);
+  Serial.print(F("Engineer: "));
+  Serial.println(ENGINEER);
+  Serial.println();
   Serial.print(F("Indirizzo Loconet: "));
   Serial.println(loconetADR);
   Serial.println();
 
   Wire.begin();
 
-  //xTaskCreate(TaskBlink1, "task1", 128, NULL, 1, NULL);
+  pinMode(STATUSLED, OUTPUT);
 
-  pinMode(STATUSLED, OUTPUT);  
+  uint8_t storedDebug = LocoNetSV.readSVStorage(SV_ADDR_DEBUG_FLAG);
+  debugEnabled = (storedDebug != 0);
+  Serial.print(F("- Debug seriale: "));
+  Serial.println(debugEnabled ? F("ABILITATO") : F("DISABILITATO")); 
 
   // check if the configuration in the EEPROM is valid
   uint8_t auxiliary = LocoNetSV.readSVStorage(SV_ADDR_AUXILIARY) ;
@@ -240,7 +364,7 @@ void setup() {
 
   //Inizializzo i pin legati alle CV
 
-  for (uint8_t i = 0; i < pinCount; i++) {
+  for (uint8_t i = 0; i < SENSOR_COUNT; i++) {
     // Se il pin è configurato come sensore TOF ed è attivo
     if (sensorInfo[i].deviceType == DEV_SENSORTOF and sensorInfo[i].isEnabled) {
       pinMode(xshut_pins[i], OUTPUT);
@@ -250,6 +374,14 @@ void setup() {
     if (sensorInfo[i].deviceType == DEV_SENSOR and sensorInfo[i].isEnabled) {
       pinMode(xshut_pins[i], INPUT);
     }
+    // Se il pin è configurato come sensore magnetico digitale ed è attivo
+    if (sensorInfo[i].deviceType == DEV_MSENSOR and sensorInfo[i].isEnabled) {
+      pinMode(xshut_pins[i], INPUT_PULLUP);
+    }
+    // Se il pin è configurato come sensore assorbimento ed è attivo
+    if (sensorInfo[i].deviceType == DEV_SENSORABS and sensorInfo[i].isEnabled) {
+      pinMode(xshut_pins[i], INPUT);
+    }
     // Se il pin è configurato come sensore IR ed è attivo
     if (sensorInfo[i].deviceType == DEV_SENSORIR and sensorInfo[i].isEnabled) {
       pinMode(xshut_pins[i], INPUT);
@@ -257,32 +389,36 @@ void setup() {
   }
 
   // Enable, initialize, and start each sensor, one by one.
-  for (uint8_t i = 0; i < pinCount; i++)
+  for (uint8_t i = 0; i < SENSOR_COUNT; i++)
   {
-    // Stop driving this sensor's XSHUT low. This should allow the carrier
-    // board to pull it high. (We do NOT want to drive XSHUT high since it is
-    // not level shifted.) Then wait a bit for the sensor to start up.
     if (sensorInfo[i].deviceType == DEV_SENSORTOF and sensorInfo[i].isEnabled) {
-      digitalWrite(xshut_pins[i], HIGH);
-      delay(10);
-      if (!sensor[i].init()) {
+      configureXshutForSensor(i);
+      if (!sensorTOF[i].init()) {
         Serial.print(F("!!! Impossibile inizializzare il sensore #"));
         Serial.print(i+1);
         Serial.println(F(" !!!"));
         failedStart = true;
       }
-      delay(10);
-      sensor[i].setAddress(0x2A + i);
-      sensor[i].setTimeout(500);
-      sensor[i].setMeasurementTimingBudget(200000);
+      sensorTOF[i].setAddress(0x2A + i);
+      sensorTOF[i].setTimeout(TOF_TIMEOUT_MS);
+      sensorTOF[i].setMeasurementTimingBudget(TOF_TIMING_BUDGET_US);
+      sensorTOF[i].startContinuous(TOF_CONTINUOUS_PERIOD_MS);
     }
   }
 
-  for (uint8_t i = 0; i < pinCount; i++) {
+  for (uint8_t i = 0; i < SENSOR_COUNT; i++) {
     sensorNextDue[i] = 0;
+    hallSensorLastState[i] = -1;
+    hallCandidateState[i] = 0;
+    hallCandidateHits[i] = 0;
+    sensorConsecutiveOn[i] = 0;
+    sensorConsecutiveOff[i] = 0;
   }
 
   Serial.println();
+  Serial.println(F("* Invia HELP per ottenere l'elenco dei comandi *"));
+  Serial.println();
+
   if (failedStart) Serial.println(F("Avvio completato con errori"));
   else Serial.println(F("Avvio completato con successo!"));
   Serial.println();
@@ -298,14 +434,39 @@ void setup() {
   } else {
     Serial.print(F("IRreceiver non attivato: I/O "));
     Serial.print(IR_UNIT_IO);
-    Serial.println(F(" non configurato come SENSORIR o non abilitato"));
+    Serial.println(F(" non configurato come Sensore IR RX o non abilitato"));
   }
 }
 
-void loop() {
+void checkSerial () {
+  while (Serial.available() > 0) {
 
-  //Dcc.process();
+    int inByte = Serial.read();
 
+    // Ignora ritorni carrello per compatibilità con CRLF
+    if (inByte == '\r') continue;
+
+    if (inByte == '\n') {
+      if (cmdlinepos > 0) {
+        cmdline[cmdlinepos] = '\0';
+        parseCmdLine();
+      }
+      cmdlinepos = 0;
+      continue;
+    }
+
+    if (cmdlinepos < CMDLINESIZE - 1) {
+      cmdline[cmdlinepos] = inByte;
+      cmdlinepos++;
+    } else {
+      // Protegge da overflow del buffer
+      cmdlinepos = 0;
+      Serial.println(F("Comando troppo lungo, input ignorato"));
+    }
+  }
+}
+
+void checkLocoNet() {
   LnPacket = LocoNet.receive();
   if (LnPacket) {
     svStatus = LocoNetSV.processMessage(LnPacket);
@@ -323,28 +484,20 @@ void loop() {
    
     LocoNet.processSwitchSensorMessage(LnPacket);
   }
+}
+
+void loop() {
+  // Controllo dati su interfaccia seriale
+  checkSerial();
+
+  // Controllo bus LocoNet
+  checkLocoNet();  
  
   // Controllo dei sensori
   serviceSensors();
 
   // Controllo beacon IR loco → LISSY su LocoNet
   checkIRBeacons();
-
-  if (Serial.available() > 0) {
-
-    int inByte = Serial.read();
-    Serial.write(inByte);
-
-    if (inByte == '\n') {
-      cmdline[cmdlinepos] = '\0';
-      parseCmdLine();
-    }
-    else {
-      cmdline[cmdlinepos] = inByte;
-      cmdlinepos++;
-      if (cmdlinepos == CMDLINESIZE) cmdlinepos = 0;
-    }
-  }
 }
 
 void initLocalVariables() {
@@ -358,72 +511,89 @@ void initLocalVariables() {
 
 void serviceSensors() {
   unsigned long now = millis();
+  unsigned long startMicros = micros();
 
   if (failedStart) {
     static unsigned long nextErrorReport = 0;
-    if (now - nextErrorReport >= SENSOR_ERROR_RETRY_MS) {
+    if (isDue(now, nextErrorReport)) {
       LocoNet.reportSensor(999, 1);
-      nextErrorReport = now;
+      nextErrorReport = now + SENSOR_ERROR_RETRY_MS;
     }
     return;
   }
 
-  for (uint8_t attempt = 0; attempt < pinCount; attempt++) {
-    uint8_t idx = (sensorScanCursor + attempt) % pinCount;
+  for (uint8_t attempt = 0; attempt < SENSOR_COUNT; attempt++) {
+    uint8_t idx = (sensorScanCursor + attempt) % SENSOR_COUNT;
     if (!sensorInfo[idx].isEnabled) {
       continue;
     }
 
-    if (now < sensorNextDue[idx]) {
-      continue;
-    }
+    if (!isDue(now, sensorNextDue[idx])) continue;
 
     checkSensor(idx);
-    sensorNextDue[idx] = now + SENSOR_MIN_INTERVAL;
-    sensorScanCursor = (idx + 1) % pinCount;
-    break; // gestisce al massimo un sensore per iterazione del loop
+    sensorNextDue[idx] = now + intervalForType(sensorInfo[idx].deviceType);
+    sensorScanCursor = (idx + 1) % SENSOR_COUNT;
+    if ((micros() - startMicros) >= SENSOR_LOOP_BUDGET_US) break;
   }
 }
 
 void checkSensor(uint8_t i) {
-  uint16_t distance;
+  if (!sensorInfo[i].isEnabled) return;
 
-  // Se il sensore è di tipo TOF
-  if (sensorInfo[i].deviceType == DEV_SENSORTOF && sensorInfo[i].isEnabled) {
-    distance = sensor[i].readRangeSingleMillimeters();
-    if (distance < (sensorInfo[i].sensdistance + 40) - THRESHOLD && !isSensorOn(i)) {
-      LocoNet.reportSensor(sensorInfo[i].dccAddress, 1);
-      setSensorState(i, true);
-      logSensorState(i, F("VL53L0X #"), sensorInfo[i].dccAddress, F("ON"), distance);
-    }
-    else if (distance > (sensorInfo[i].sensdistance + 40) + THRESHOLD && isSensorOn(i)) {
-      LocoNet.reportSensor(sensorInfo[i].dccAddress, 0);
-      setSensorState(i, false);
-      logSensorState(i, F("VL53L0X #"), sensorInfo[i].dccAddress, F("OFF"), distance);
-    }
-  }
+  switch (sensorInfo[i].deviceType) {
+    case DEV_SENSORTOF: {
+      uint16_t distance = sensorTOF[i].readRangeContinuousMillimeters();
+      if (sensorTOF[i].timeoutOccurred()) {
+        if (debugEnabled) {
+          Serial.print(F("Timeout lettura VL53L0X #"));
+          Serial.println(i + 1);
+        }
+        return;
+      }
 
-  // Se il sensore è di tipo HALL
-  if (sensorInfo[i].deviceType == DEV_SENSOR && sensorInfo[i].isEnabled){
-    int analog_value = analogRead(xshut_pins[i]);
-    #ifdef DEBUG
-    Serial.print(F("Analog Value HALL Sensor #"));
-    Serial.print(i+1);
-    Serial.print(F(": "));
-    Serial.println(analog_value);
-    #endif
-    if (analog_value >= (hallSensorSTDVAL - 30) && analog_value <= (hallSensorSTDVAL + 30)) {
-      LocoNet.reportSensor(sensorInfo[i].dccAddress, 0);
-      logSensorState(i, F("HALLSENSOR #"), sensorInfo[i].dccAddress, F("NON PRESENTE"), analog_value);
+      const uint16_t target = sensorInfo[i].sensdistance;
+      const bool candidateOn = distance <= target - THRESHOLD;
+      const bool candidateOff = distance >= target + THRESHOLD;
+      handleBinarySensor(i, candidateOn, candidateOff, F("VL53L0X #"), distance, true);
+      break;
     }
-    else if (analog_value < (hallSensorSTDVAL - 30)) {//sensorInfo[i].sensdistance)) {
-      LocoNet.reportSensor(sensorInfo[i].dccAddress, 1);
-      logSensorState(i, F("HALLSENSOR #"), sensorInfo[i].dccAddress, F("Bachmann 4-6-2"), analog_value);
+
+    case DEV_SENSOR: {
+      const uint16_t analogValue = analogRead(xshut_pins[i]);
+
+      if (debugEnabled) {
+        Serial.print(F("Analog Value HALL Sensor #"));
+        Serial.print(i + 1);
+        Serial.print(F(": "));
+        Serial.println(analogValue);
+      }
+
+      uint8_t state = 0;
+      if (analogValue < (hallSensorSTDVAL - HALL_TOLERANCE)) state = 1;
+      else if (analogValue > (hallSensorSTDVAL + HALL_TOLERANCE)) state = 2;
+
+      handleHallState(i, state, analogValue, F("HALLSENSOR #"));
+      break;
     }
-    else if (analog_value > (hallSensorSTDVAL + 30)) {//sensorInfo[i].sensdistance)) {
-      LocoNet.reportSensor(sensorInfo[i].dccAddress, 2);
-      logSensorState(i, F("HALLSENSOR #"), sensorInfo[i].dccAddress, F("Spectrum 2-6-0 Bumble Bee"), analog_value);
+
+    case DEV_MSENSOR: {
+      const bool active = (digitalRead(xshut_pins[i]) == LOW);
+      handleBinarySensor(i, active, !active, F("Sensore #"));
+      break;
     }
+
+    case DEV_SENSORABS: {
+      const uint16_t analogValue = analogRead(xshut_pins[i]);
+      const uint16_t threshold = sensorInfo[i].sensdistance;
+      const bool active = analogValue >= (threshold + THRESHOLD);
+      const bool inactive = analogValue <= (threshold - THRESHOLD);
+
+      handleBinarySensor(i, active, inactive, F("ABSSENSOR #"), analogValue, true);
+      break;
+    }
+
+    default:
+      break;
   }
 }
 
@@ -464,14 +634,14 @@ void sendLissyReport(uint16_t unit, uint16_t locoAddr) {
 
   // Invia su LocoNet
   LN_STATUS st = LocoNet.send(&tx);
-#ifdef DEBUG
-  Serial.print(F("LISSY REP unit="));
-  Serial.print(unit);
-  Serial.print(F(" loco="));
-  Serial.print(locoAddr);
-  Serial.print(F(" status="));
-  Serial.println(st);
-#endif
+  if (debugEnabled) {
+    Serial.print(F("LISSY REP unit="));
+    Serial.print(unit);
+    Serial.print(F(" loco="));
+    Serial.print(locoAddr);
+    Serial.print(F(" status="));
+    Serial.println(st);
+  }
 }
 
 void checkIRBeacons() {
@@ -481,14 +651,14 @@ void checkIRBeacons() {
 
   auto &d = IrReceiver.decodedIRData;
 
-#ifdef DEBUG
-  Serial.print(F("IR recv: proto="));
-  Serial.print(d.protocol);
-  Serial.print(F(" addr="));
-  Serial.print(d.address, HEX);
-  Serial.print(F(" cmd="));
-  Serial.println(d.command, HEX);
-#endif
+  if (debugEnabled) {
+    Serial.print(F("IR recv: proto="));
+    Serial.print(d.protocol);
+    Serial.print(F(" addr="));
+    Serial.print(d.address, HEX);
+    Serial.print(F(" cmd="));
+    Serial.println(d.command, HEX);
+  }
 
   // Filtra un minimo: accettiamo solo NEC, ma se il tuo tx usa altro puoi allentare
   // if (d.protocol != NEC) {   // se ti crea problemi, commenta questa riga
@@ -516,9 +686,9 @@ void checkIRBeacons() {
   // Esempio semplice: prendi il primo sensore abilitato di tipo TOF come "punto LISSY"
   int irIndex = IR_UNIT_INDEX;
   if (!(sensorInfo[irIndex].isEnabled && sensorInfo[irIndex].deviceType == DEV_SENSORIR)) {
-#ifdef DEBUG
-    Serial.println(F("Sensore IR non configurato o non abilitato su I/O 8 -> scarto"));
-#endif
+    if (debugEnabled) {
+      Serial.println(F("Sensore IR non configurato o non abilitato su I/O 8 -> scarto"));
+    }
     IrReceiver.resume();
     return;
   }
