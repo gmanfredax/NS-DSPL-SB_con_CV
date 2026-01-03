@@ -7,11 +7,11 @@ void softwareReset( uint8_t prescaller) {
   while(1) {}
 }
 
-// restore the configuration from EEPROM
+// Carica configurazione dalla EEPROM
 void readConfigFromStorage() {
 
   int currentAddress = 20;
-  for(int i = 0; i < pinCount; i++) {
+  for(int i = 0; i < IOPINS; i++) {
 
     sensorInfo[i].dccAddress = LocoNetSV.readSVStorage(currentAddress);
     sensorInfo[i].deviceType = LocoNetSV.readSVStorage(currentAddress+1);
@@ -35,7 +35,6 @@ void readConfigFromStorage() {
 void notifySVChanged(uint16_t Offset) {
 
   if (Offset >= SV_ADDR_SENSOR1_LNADR and Offset <= SV_ADDR_SENSOR8_ENABLED) {
-    //sensorsNumber = LocoNetSV.readSVStorage(SV_ADDR_NUM_SENSORS) ;
     Serial.print("CV "); Serial.print(Offset); Serial.print(" aggiornata. Nuovo valore: "); Serial.println(LocoNetSV.readSVStorage(Offset));
     readConfigFromStorage();
     softwareReset(WDTO_60MS);
@@ -44,6 +43,10 @@ void notifySVChanged(uint16_t Offset) {
     changeSensorAddress();
     readConfigFromStorage();
     softwareReset(WDTO_60MS);
+  } else if (Offset == SV_ADDR_DEBUG_FLAG) {
+    debugEnabled = (LocoNetSV.readSVStorage(SV_ADDR_DEBUG_FLAG) != 0);
+    Serial.print("Debug seriale aggiornato: ");
+    Serial.println(debugEnabled ? "ABILITATO" : "DISABILITATO");
   }
 }
 
@@ -122,6 +125,8 @@ void setFactoryDefault() {
   EEPROM.put(SV_ADDR_SENSOR8_TYPE-2, DEV_SENSOR);
   EEPROM.put(SV_ADDR_SENSOR8_SENSDISTANCE-2, 50);
   EEPROM.put(SV_ADDR_SENSOR8_ENABLED-2, 0);
+  EEPROM.put(SV_ADDR_DEBUG_FLAG-2, VALUE_DEBUG_DEFAULT);
+  debugEnabled = (VALUE_DEBUG_DEFAULT != 0);
 
   Serial.println("Reset Completato. Riavviare per applicare le modifiche!");
 
@@ -129,22 +134,33 @@ void setFactoryDefault() {
 
 // print the current configuration
 void printConfiguration() {
+  
+  uint8_t adrLo = LocoNetSV.readSVStorage(SV_ADDR_CHANGE_ID_L) ;
+  uint8_t adrHi = LocoNetSV.readSVStorage(SV_ADDR_CHANGE_ID_H) ;
+  uint8_t loconetADR = ((adrHi * 256 + adrLo) * 10);
 
-  Serial.println(("Configurazione corrente:"));
+  Serial.println();
+  Serial.println(F("*********************************************************"));
+  Serial.println(F("Configurazione corrente:"));
+  Serial.println();
+  Serial.print(F("Debug seriale: "));
+  Serial.println(debugEnabled ? ("ABILITATO") : ("DISABILITATO"));
+  Serial.print(F("Indirizzo Loconet: "));
+  Serial.println(loconetADR);
   Serial.println();
 
-  for(int i = 0; i < pinCount; i++) {
-
+  for(uint8_t i = 0; i < IOPINS; i++) {
     Serial.print(("I/O ")); Serial.print(i + 1); Serial.print("\t");
-    Serial.print(("Addr: ")); Serial.print(sensorInfo[i].dccAddress); Serial.print("  ");
-    Serial.print(("Type: ")); Serial.print(("INPUT")); Serial.print("  ");
-    Serial.print(("Device: ")); 
+    Serial.print(("Indirizzo Loconet: ")); Serial.print(sensorInfo[i].dccAddress); Serial.print("  ");
+    Serial.print(("Tipo: ")); Serial.print(("INPUT")); Serial.print("  ");
+    Serial.print(("Dispositivo: ")); 
     if(sensorInfo[i].deviceType == DEV_SENSOR) Serial.print(("SENSORE")); 
     else if(sensorInfo[i].deviceType == DEV_SENSORTOF) Serial.print(("SENSORE TOF"));
     else if(sensorInfo[i].deviceType == DEV_SENSORIR) Serial.print(("SENSORE IR RX"));    
+    else if(sensorInfo[i].deviceType == DEV_SENSORABS) Serial.print(("SENSORE ASSORBIMENTO"));
     else if(sensorInfo[i].deviceType == DEV_MSENSOR) Serial.print("MSENSOR"); 
     Serial.print("  ");
-    Serial.print(("State: ")); isSensorOn(i) ? Serial.print(("ON")) : Serial.print(("OFF")); Serial.print("  ");
-    Serial.print(("ENABLED: ")); sensorInfo[i].isEnabled ? Serial.print(("YES")) : Serial.print(("NO")); Serial.print("\n");
+    Serial.print(("Stato: ")); isSensorOn(i) ? Serial.print(("ON")) : Serial.print(("OFF")); Serial.print("  ");
+    Serial.print(("ABILITATO: ")); sensorInfo[i].isEnabled ? Serial.print(("YES")) : Serial.print(("NO")); Serial.print("\n");
   }
 }
