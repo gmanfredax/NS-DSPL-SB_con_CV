@@ -1,4 +1,4 @@
-// NS-DSPL-SB v1.2-BETA5
+// NS-DSPL-SB v1.2-BETA6
 // Decoder DCC per 8 sensori (TOF, HALL EFFECT e ASSORBIMENTO)
 // Configurazione tramite CV
 // NeXtorSystem 2025
@@ -61,12 +61,14 @@ const unsigned long SENSOR_ERROR_RETRY_MS = 1000;
 const uint16_t TOF_TIMEOUT_MS = 50;
 const uint32_t TOF_TIMING_BUDGET_US = 20000;
 const uint16_t TOF_CONTINUOUS_PERIOD_MS = 60;
+const uint8_t TOF_BASE_I2C_ADDRESS = 0x2A;
+const uint8_t MAX_TOF_DEVICES = (SENSOR_COUNT < (0x7F - TOF_BASE_I2C_ADDRESS)) ? SENSOR_COUNT : (0x7F - TOF_BASE_I2C_ADDRESS);
 
 /******* Inizio Dichiarazione Indirizzo e Valori di default delle CV *******/
 
 // const uint16_t SV_ADDR_SW_VERSION = 2 ;       
 const uint8_t VALUE_SW_VERSION = 1 ;
-const char VALUE_SW_REV[] = "2-BETA5" ;
+const char VALUE_SW_REV[] = "2-BETA6" ;
 const char MANUFACTURER[] = "NeXtorSystem" ;
 const char ENGINEER[] = "Gabriele Manfreda" ;
 
@@ -164,16 +166,22 @@ typedef struct {
   uint8_t isEnabled;
 } SensorInfo;
 
-// Variabili Globali
-VL53L0X sensorTOF[SENSOR_COUNT];
-int hallSensorSTDVAL = 543;
+struct SensorRuntimeDescriptor {
+  uint8_t index;
+  uint8_t pin;
+};
 
+//Variabili Globali
 LocoNetSystemVariableClass LocoNetSV;
 lnMsg *LnPacket;
 SV_STATUS   svStatus = SV_OK;
 boolean     deferredProcessingNeeded = false;
 
 SensorInfo sensorInfo[SENSOR_COUNT];
+SensorRuntimeDescriptor tofSensors[MAX_TOF_DEVICES];
+uint8_t tofSensorCount = 0;
+VL53L0X sensorTOF[SENSOR_COUNT];
+int hallSensorSTDVAL = 543;
 uint16_t sensorStateMask = 0; // bitmask invece di array bool per ridurre RAM
 char cmdline[CMDLINESIZE];
 bool debugEnabled = false;
@@ -200,12 +208,103 @@ inline void setSensorState(uint8_t idx, bool on) {
   else    sensorStateMask &= (uint16_t)~bit;
 }
 
-void configureXshutForSensor(uint8_t activeIndex) {
-  for (uint8_t pin = 0; pin < SENSOR_COUNT; ++pin) {
-    if (!(sensorInfo[pin].deviceType == DEV_SENSORTOF && sensorInfo[pin].isEnabled)) continue;
-    digitalWrite(xshut_pins[pin], pin <= activeIndex ? HIGH : LOW);
+uint8_t maxSupportedTofSensors() {
+  return MAX_TOF_DEVICES;
+}
+
+void buildSensorInventory() {
+  tofSensorCount = 0;
+
+  for (uint8_t i = 0; i < SENSOR_COUNT; ++i) {
+    if (sensorInfo[i].isEnabled && sensorInfo[i].deviceType == DEV_SENSORTOF && tofSensorCount < MAX_TOF_DEVICES) {
+      tofSensors[tofSensorCount].index = i;
+      tofSensors[tofSensorCount].pin = xshut_pins[i];
+      tofSensorCount++;
+    }
+  }
+}
+
+void configurePinsByType() {
+  for (uint8_t i = 0; i < SENSOR_COUNT; i++) {
+    if (!sensorInfo[i].isEnabled) {
+      pinMode(xshut_pins[i], INPUT);
+      continue;
+    }
+
+    switch (sensorInfo[i].deviceType) {
+      case DEV_SENSORTOF:
+        pinMode(xshut_pins[i], OUTPUT);
+        digitalWrite(xshut_pins[i], LOW);
+        break;
+      case DEV_SENSOR:
+        pinMode(xshut_pins[i], INPUT);
+        break;
+      case DEV_MSENSOR:
+        pinMode(xshut_pins[i], INPUT_PULLUP);
+        break;
+      case DEV_SENSORABS:
+        pinMode(xshut_pins[i], INPUT);
+        break;
+      case DEV_SENSORIR:
+        pinMode(xshut_pins[i], INPUT);
+        break;
+      default:
+        pinMode(xshut_pins[i], INPUT);
+        break;
+    }
+  }
+}
+
+void powerDownAllTofSensors() {
+  for (uint8_t i = 0; i < tofSensorCount; ++i) {
+    digitalWrite(tofSensors[i].pin, LOW);
   }
   delay(10);
+}
+
+bool initTofSensors() {
+  if (tofSensorCount == 0) return true;
+
+  if (tofSensorCount > MAX_TOF_DEVICES) {
+    Serial.print(F("Numero di sensori TOF abilitati superiore al limite: " ));
+    Serial.print(tofSensorCount);
+    Serial.print(F(" (max: "));
+    Serial.print(MAX_TOF_DEVICES);
+    Serial.println(F(")"));
+    tofSensorCount = MAX_TOF_DEVICES;
+  }
+
+  powerDownAllTofSensors();
+  bool success = true;
+
+  for (uint8_t i = 0; i < tofSensorCount; ++i) {
+    uint8_t sensorIndex = tofSensors[i].index;
+    digitalWrite(tofSensors[i].pin, HIGH);
+    delay(10);
+
+    if (!sensorTOF[sensorIndex].init()) {
+      Serial.print(F("!!! Impossibile inizializzare il sensore TOF #"));
+      Serial.print(sensorIndex + 1);
+      Serial.println(F(" !!!"));
+      success = false;
+      continue;
+    }
+
+    const uint8_t newAddress = TOF_BASE_I2C_ADDRESS + i;
+    sensorTOF[sensorIndex].setAddress(newAddress);
+    sensorTOF[sensorIndex].setTimeout(TOF_TIMEOUT_MS);
+    sensorTOF[sensorIndex].setMeasurementTimingBudget(TOF_TIMING_BUDGET_US);
+    sensorTOF[sensorIndex].startContinuous(TOF_CONTINUOUS_PERIOD_MS);
+
+    if (debugEnabled) {
+      Serial.print(F("TOF #"));
+      Serial.print(sensorIndex + 1);
+      Serial.print(F(" avviato con indirizzo I2C 0x"));
+      Serial.println(newAddress, HEX);
+    }
+  }
+
+  return success;
 }
 
 void publishSensorState(uint8_t index, bool active, const __FlashStringHelper *sensorName, uint16_t measurement = 0, bool includeValue = false) {
@@ -362,48 +461,13 @@ void setup() {
 
   initLocalVariables() ;
 
-  //Inizializzo i pin legati alle CV
+  // Inizializzo i pin legati alle CV
+  configurePinsByType();
 
-  for (uint8_t i = 0; i < SENSOR_COUNT; i++) {
-    // Se il pin è configurato come sensore TOF ed è attivo
-    if (sensorInfo[i].deviceType == DEV_SENSORTOF and sensorInfo[i].isEnabled) {
-      pinMode(xshut_pins[i], OUTPUT);
-      digitalWrite(xshut_pins[i], LOW);
-    }
-    // Se il pin è configurato come sensore ed è attivo
-    if (sensorInfo[i].deviceType == DEV_SENSOR and sensorInfo[i].isEnabled) {
-      pinMode(xshut_pins[i], INPUT);
-    }
-    // Se il pin è configurato come sensore magnetico digitale ed è attivo
-    if (sensorInfo[i].deviceType == DEV_MSENSOR and sensorInfo[i].isEnabled) {
-      pinMode(xshut_pins[i], INPUT_PULLUP);
-    }
-    // Se il pin è configurato come sensore assorbimento ed è attivo
-    if (sensorInfo[i].deviceType == DEV_SENSORABS and sensorInfo[i].isEnabled) {
-      pinMode(xshut_pins[i], INPUT);
-    }
-    // Se il pin è configurato come sensore IR ed è attivo
-    if (sensorInfo[i].deviceType == DEV_SENSORIR and sensorInfo[i].isEnabled) {
-      pinMode(xshut_pins[i], INPUT);
-    }
-  }
-
-  // Enable, initialize, and start each sensor, one by one.
-  for (uint8_t i = 0; i < SENSOR_COUNT; i++)
-  {
-    if (sensorInfo[i].deviceType == DEV_SENSORTOF and sensorInfo[i].isEnabled) {
-      configureXshutForSensor(i);
-      if (!sensorTOF[i].init()) {
-        Serial.print(F("!!! Impossibile inizializzare il sensore #"));
-        Serial.print(i+1);
-        Serial.println(F(" !!!"));
-        failedStart = true;
-      }
-      sensorTOF[i].setAddress(0x2A + i);
-      sensorTOF[i].setTimeout(TOF_TIMEOUT_MS);
-      sensorTOF[i].setMeasurementTimingBudget(TOF_TIMING_BUDGET_US);
-      sensorTOF[i].startContinuous(TOF_CONTINUOUS_PERIOD_MS);
-    }
+  // Costruisco la lista dei sensori TOF e li attivo uno alla volta per assegnare indirizzi univoci
+  buildSensorInventory();
+  if (!initTofSensors()) {
+    failedStart = true;
   }
 
   for (uint8_t i = 0; i < SENSOR_COUNT; i++) {
