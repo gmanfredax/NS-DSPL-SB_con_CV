@@ -3,10 +3,12 @@ void printUsage() {
   Serial.println(F("SENSOR <ioPin>: Imposta ioPin come un SENSORE"));
   Serial.println(F("SENSORTOF <ioPin>: Imposta ioPin come un SENSORE ToF")); 
   Serial.println(F("SENSORIR <ioPin>: Imposta l'IR RX sull'ioPin (solo 8 ammesso)"));
+  Serial.println(F("SENSORABS <ioPin>: Imposta ioPin come un SENSORE ASSORBIMENTO"));
   Serial.println(F("MSENSOR <ioPin>: Imposta ioPin come un SENSORE MOMENTANEO"));  
   Serial.println(F("ABILITA <ioPin>: Abilita ioPin"));  
   Serial.println(F("DISABILITA <ioPin>: Disabilita ioPin"));    
   Serial.println(F("ADDRESS <ioPin> <dccAddress>: Imposta dccAddress per il pin ioPin"));
+  Serial.println(F("DEBUG <ON|OFF>: Abilita o disabilita i messaggi di debug su seriale"));
   Serial.println(F("STATUS: Stampa lo stato attuale"));
   Serial.println(F("RESET: Ripristina alle impostazioni di fabbrica"));
   Serial.println(F("REBOOT: Riavvia il sistema"));
@@ -38,7 +40,6 @@ void parseCmdLine() {
       uint8_t pincv = ((ioPin-1) * 4) + 21;
       sensorInfo[ioPin - 1].deviceType = DEV_SENSOR;
       LocoNetSV.writeSVStorage(pincv, DEV_SENSOR);
-      //saveConfigToEEPROM();
     }    
   }
 
@@ -55,7 +56,6 @@ void parseCmdLine() {
       uint8_t pincv = ((ioPin-1) * 4) + 21;
       sensorInfo[ioPin - 1].deviceType = DEV_SENSORTOF;
       LocoNetSV.writeSVStorage(pincv, DEV_SENSORTOF);
-      //saveConfigToEEPROM();
     }
   }
 
@@ -76,7 +76,22 @@ void parseCmdLine() {
       uint8_t pincv = ((ioPin-1) * 4) + 21;
       sensorInfo[ioPin - 1].deviceType = DEV_SENSORIR;
       LocoNetSV.writeSVStorage(pincv, DEV_SENSORIR);
-      //saveConfigToEEPROM();
+    }
+  }
+
+  // SENSOR ASSORBIMENTO
+  else if(strcmp(command, "SENSORABS") == 0) {
+
+    int ioPin = atoi(strtok(NULL, " "));
+    if(ioPin < 1 || ioPin > IOPINS) {
+      Serial.print(F("Invalid ioPin: "));
+      Serial.println(ioPin);
+      Serial.println();
+    }
+    else {
+      uint8_t pincv = ((ioPin-1) * 4) + 21;
+      sensorInfo[ioPin - 1].deviceType = DEV_SENSORABS;
+      LocoNetSV.writeSVStorage(pincv, DEV_SENSORABS);
     }
   }
 
@@ -93,7 +108,6 @@ void parseCmdLine() {
       uint8_t pincv = ((ioPin-1) * 4) + 21;
       sensorInfo[ioPin - 1].deviceType = DEV_MSENSOR;
       LocoNetSV.writeSVStorage(pincv, DEV_MSENSOR);
-      //saveConfigToEEPROM();
     }    
   }
   
@@ -110,9 +124,6 @@ void parseCmdLine() {
       uint8_t pincv = ((ioPin-1) * 4) + 23;
       sensorInfo[ioPin - 1].isEnabled = true;
       LocoNetSV.writeSVStorage(pincv, 1);
-      // servo1PLIV.attach(5);
-      // servo2PLIV.attach(9);
-      //saveConfigToEEPROM();
     }    
   }
 
@@ -129,9 +140,6 @@ void parseCmdLine() {
       uint8_t pincv = ((ioPin-1) * 4) + 23;
       sensorInfo[ioPin - 1].isEnabled = false;
       LocoNetSV.writeSVStorage(pincv, 0);
-      // servo1PLIV.detach();
-      // servo2PLIV.detach();
-      //saveConfigToEEPROM();
     }    
   }
 
@@ -155,21 +163,39 @@ void parseCmdLine() {
       } else {
         uint8_t pincv = ((ioPin-1) * 4) + 20;
         sensorInfo[ioPin - 1].dccAddress = address;
-        //saveConfigToEEPROM();
         LocoNetSV.writeSVStorage(pincv, address);
       }
     }    
+  }
+
+  // DEBUG
+  else if(strcmp(command, "DEBUG") == 0) {
+
+    char *state = strtok(NULL, " ");
+    if (state == NULL) {
+      Serial.println(F("Uso: DEBUG ON|OFF"));
+    } else {
+      if(strcmp(state, "ON") == 0 || strcmp(state, "1") == 0) {
+        debugEnabled = true;
+      } else if(strcmp(state, "OFF") == 0 || strcmp(state, "0") == 0) {
+        debugEnabled = false;
+      } else {
+        Serial.println(F("Valore non valido. Usa ON oppure OFF."));
+        cmdlinepos = 0;
+        return;
+      }
+      LocoNetSV.writeSVStorage(SV_ADDR_DEBUG_FLAG, debugEnabled ? 1 : 0);
+      Serial.print(F("Debug seriale: "));
+      Serial.println(debugEnabled ? F("ABILITATO") : F("DISABILITATO"));
+    }
   }
 
   // STATUS
   else if(strcmp(command, "STATUS") == 0) printConfiguration();
 
   // RESET
-  else if(strcmp(command, "RESET") == 0) {
-    
+  else if(strcmp(command, "RESET") == 0) {    
     setFactoryDefault();
-    //resetConfiguration();
-    //saveConfigToEEPROM();
   }
 
   // REBOOT
