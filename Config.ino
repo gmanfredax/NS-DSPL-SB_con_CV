@@ -1,3 +1,5 @@
+void handleNodeIdUpdate();
+
 void softwareReset( uint8_t prescaller) {
   // start watchdog with the provided prescaller
   wdt_enable( prescaller);
@@ -38,6 +40,9 @@ void notifySVChanged(uint16_t Offset) {
     Serial.print("CV "); Serial.print(Offset); Serial.print(" aggiornata. Nuovo valore: "); Serial.println(LocoNetSV.readSVStorage(Offset));
     readConfigFromStorage();
     softwareReset(WDTO_60MS);
+  } else if (Offset == SV_ADDR_NODE_ID_L || Offset == SV_ADDR_NODE_ID_H) {
+    Serial.print("CV "); Serial.print(Offset); Serial.print(" aggiornata. Nuovo valore: "); Serial.println(LocoNetSV.readSVStorage(Offset));
+    handleNodeIdUpdate();
   } else if (Offset == SV_ADDR_CHANGE_ID_L) {
     Serial.print("CV "); Serial.print(Offset); Serial.print(" aggiornata. Nuovo valore: "); Serial.println(LocoNetSV.readSVStorage(Offset));
     changeSensorAddress();
@@ -134,6 +139,8 @@ void setFactoryDefault() {
 
 // print the current configuration
 void printConfiguration() {
+
+  nodeId = readNodeIdFromStorage();
   
   uint8_t adrLo = LocoNetSV.readSVStorage(SV_ADDR_CHANGE_ID_L) ;
   uint8_t adrHi = LocoNetSV.readSVStorage(SV_ADDR_CHANGE_ID_H) ;
@@ -146,7 +153,7 @@ void printConfiguration() {
   Serial.print(F("Debug seriale: "));
   Serial.println(debugEnabled ? ("ABILITATO") : ("DISABILITATO"));
   Serial.print(F("Indirizzo Loconet: "));
-  Serial.println(loconetADR);
+  Serial.println(nodeId);
   Serial.println();
 
   for(uint8_t i = 0; i < IOPINS; i++) {
