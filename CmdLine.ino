@@ -8,6 +8,7 @@ void printUsage() {
   Serial.println(F("ABILITA <ioPin>: Abilita ioPin"));  
   Serial.println(F("DISABILITA <ioPin>: Disabilita ioPin"));    
   Serial.println(F("ADDRESS <ioPin> <dccAddress>: Imposta dccAddress per il pin ioPin"));
+  Serial.println(F("NODEID <valore>: Imposta il NODE_ID (indirizzo di nodo)"));
   Serial.println(F("DEBUG <ON|OFF>: Abilita o disabilita i messaggi di debug su seriale"));
   Serial.println(F("STATUS: Stampa lo stato attuale"));
   Serial.println(F("RESET: Ripristina alle impostazioni di fabbrica"));
@@ -166,6 +167,31 @@ void parseCmdLine() {
         LocoNetSV.writeSVStorage(pincv, address);
       }
     }    
+  }
+
+  // NODEID
+  else if(strcmp(command, "NODEID") == 0) {
+    char *valueStr = strtok(NULL, " ");
+    if (valueStr == NULL) {
+      Serial.println(F("Uso: NODEID <valore>"));
+      Serial.println();
+    } else {
+      long newId = atol(valueStr);
+      if (newId < 0 || newId > 4095) {
+        Serial.print(F("Invalid NODE_ID: "));
+        Serial.println(newId);
+        Serial.println();
+      } else {
+        uint8_t lo = newId & 0xFF;
+        uint8_t hi = (newId >> 8) & 0xFF;
+        LocoNetSV.writeSVStorage(SV_ADDR_NODE_ID_L, lo);
+        LocoNetSV.writeSVStorage(SV_ADDR_NODE_ID_H, hi);
+        handleNodeIdUpdate();
+        Serial.print(F("NODE_ID aggiornato a: "));
+        Serial.println(newId == 0 ? 1 : newId);
+        Serial.println();
+      }
+    }
   }
 
   // DEBUG
