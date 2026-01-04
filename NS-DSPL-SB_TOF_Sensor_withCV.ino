@@ -57,12 +57,18 @@ const unsigned long SENSOR_INTERVAL_ANALOG = 25;
 const unsigned long SENSOR_INTERVAL_DIGITAL = 15;
 const unsigned long SENSOR_LOOP_BUDGET_US = 3500;
 const unsigned long SENSOR_MIN_INTERVAL = 50; // intervallo minimo tra due letture sullo stesso sensore
-const unsigned long SENSOR_ERROR_RETRY_MS = 1000;
 const uint16_t TOF_TIMEOUT_MS = 50;
 const uint32_t TOF_TIMING_BUDGET_US = 20000;
 const uint16_t TOF_CONTINUOUS_PERIOD_MS = 60;
 const uint8_t TOF_BASE_I2C_ADDRESS = 0x2A;
 const uint8_t MAX_TOF_DEVICES = (SENSOR_COUNT < (0x7F - TOF_BASE_I2C_ADDRESS)) ? SENSOR_COUNT : (0x7F - TOF_BASE_I2C_ADDRESS);
+
+const uint16_t DEFAULT_NODE_ID = 1;
+const uint16_t BASE_READY = 900;
+const uint16_t BASE_FAULT = 910;
+const uint16_t BASE_ALIVE = 920;
+const uint32_t HEALTH_ALIVE_INTERVAL_MS = 1000;
+const uint32_t HEALTH_RESYNC_INTERVAL_MS = 12000;
 
 /******* Inizio Dichiarazione Indirizzo e Valori di default delle CV *******/
 
@@ -72,9 +78,9 @@ const char VALUE_SW_REV[] = "2-BETA6" ;
 const char MANUFACTURER[] = "NeXtorSystem" ;
 const char ENGINEER[] = "Gabriele Manfreda" ;
 
-// const uint16_t SV_ADDR_NODE_ID_L = 3 ;  
-// const uint16_t SV_ADDR_NODE_ID_H = 4 ;   
-const uint8_t VALUE_NODE_ID_L = 0 ;  // default address = 0
+//const uint16_t SV_ADDR_NODE_ID_L = 3 ;  
+//const uint16_t SV_ADDR_NODE_ID_H = 4 ;   
+const uint8_t VALUE_NODE_ID_L = 1 ;  // default address = 1
 const uint8_t VALUE_NODE_ID_H = 0 ;  // address = SV_ADDR_NODE_ID_H * 256 + SV_ADDR_NODE_ID_L
 
 //  SV_ADDR_SERIAL_NUMBER_L = 5,
@@ -195,6 +201,14 @@ uint8_t hallCandidateState[SENSOR_COUNT];
 uint8_t hallCandidateHits[SENSOR_COUNT];
 uint8_t sensorConsecutiveOn[SENSOR_COUNT];
 uint8_t sensorConsecutiveOff[SENSOR_COUNT];
+uint16_t nodeId = DEFAULT_NODE_ID;
+uint16_t readyAddress = 0;
+uint16_t faultAddress = 0;
+uint16_t aliveAddress = 0;
+bool readyState = false;
+bool faultState = false;
+uint32_t nextHealthAliveDue = 0;
+uint32_t nextHealthResyncDue = 0;
 
 inline bool isSensorOn(uint8_t idx) {
   if (idx >= 16) return false;
@@ -227,7 +241,13 @@ void buildSensorInventory() {
 void configurePinsByType() {
   for (uint8_t i = 0; i < SENSOR_COUNT; i++) {
     if (!sensorInfo[i].isEnabled) {
-      pinMode(xshut_pins[i], INPUT);
+      if (sensorInfo[i].deviceType == DEV_SENSORTOF) {
+        // Mantiene spenti i sensori TOF disabilitati forzando XSHUT a LOW
+        pinMode(xshut_pins[i], OUTPUT);
+        digitalWrite(xshut_pins[i], LOW);
+      } else {
+        pinMode(xshut_pins[i], INPUT);
+      }
       continue;
     }
 
@@ -256,8 +276,10 @@ void configurePinsByType() {
 }
 
 void powerDownAllTofSensors() {
-  for (uint8_t i = 0; i < tofSensorCount; ++i) {
-    digitalWrite(tofSensors[i].pin, LOW);
+  for (uint8_t i = 0; i < SENSOR_COUNT; ++i) {
+    if (sensorInfo[i].deviceType != DEV_SENSORTOF) continue;
+    pinMode(xshut_pins[i], OUTPUT);
+    digitalWrite(xshut_pins[i], LOW);
   }
   delay(10);
 }
@@ -296,12 +318,10 @@ bool initTofSensors() {
     sensorTOF[sensorIndex].setMeasurementTimingBudget(TOF_TIMING_BUDGET_US);
     sensorTOF[sensorIndex].startContinuous(TOF_CONTINUOUS_PERIOD_MS);
 
-    if (debugEnabled) {
-      Serial.print(F("TOF #"));
-      Serial.print(sensorIndex + 1);
-      Serial.print(F(" avviato con indirizzo I2C 0x"));
-      Serial.println(newAddress, HEX);
-    }
+    Serial.print(F("TOF #"));
+    Serial.print(sensorIndex + 1);
+    Serial.print(F(" avviato con indirizzo I2C 0x"));
+    Serial.println(newAddress, HEX);
   }
 
   return success;
@@ -342,6 +362,108 @@ void publishHallState(uint8_t index, uint8_t state, uint16_t analogValue, const 
 
 inline bool isDue(uint32_t now, uint32_t due) {
   return (int32_t)(now - due) >= 0;
+}
+
+uint16_t readNodeIdFromStorage() {
+  uint16_t nodeIdLo = LocoNetSV.readSVStorage(SV_ADDR_NODE_ID_L);
+  uint16_t nodeIdHi = LocoNetSV.readSVStorage(SV_ADDR_NODE_ID_H);
+  uint16_t rawId = (nodeIdHi << 8) | nodeIdLo;
+
+  if (rawId == 0) {
+    rawId = DEFAULT_NODE_ID;
+    LocoNetSV.writeSVStorage(SV_ADDR_NODE_ID_L, rawId & 0xFF);
+    LocoNetSV.writeSVStorage(SV_ADDR_NODE_ID_H, (rawId >> 8) & 0xFF);
+  }
+
+  return rawId;
+}
+
+void compute_health_addrs(uint16_t node_id, uint16_t &ready, uint16_t &fault, uint16_t &alive) {
+  ready = BASE_READY + node_id;
+  fault = BASE_FAULT + node_id;
+  alive = BASE_ALIVE + node_id;
+}
+
+void send_feedback(uint16_t address, uint8_t state) {
+  LocoNet.reportSensor(address, state ? 1 : 0);
+  if (debugEnabled) {
+    Serial.print(F("[HEALTH] addr="));
+    Serial.print(address);
+    Serial.print(F(" state="));
+    Serial.println(state);
+  }
+}
+
+void publishHealthState(uint16_t address, bool state, const __FlashStringHelper *label) {
+  send_feedback(address, state ? 1 : 0);
+
+  if (debugEnabled) {
+    Serial.print(F("[HEALTH] "));
+    Serial.print(label);
+    Serial.print(F(" -> "));
+    Serial.print(state ? F("ON") : F("OFF"));
+    Serial.print(F(" (addr "));
+    Serial.print(address);
+    Serial.println(F(")"));
+  }
+}
+
+void setReadyState(bool state, bool force = false) {
+  if (!force && readyState == state) return;
+  readyState = state;
+  publishHealthState(readyAddress, state, F("READY"));
+}
+
+void setFaultState(bool state, bool force = false) {
+  if (!force && faultState == state) return;
+  faultState = state;
+  publishHealthState(faultAddress, state, F("FAULT"));
+}
+
+void setHealthStates(bool ready, bool fault, bool force = false) {
+  setReadyState(ready, force);
+  setFaultState(fault, force);
+}
+
+void refreshHealthAddresses() {
+  compute_health_addrs(nodeId, readyAddress, faultAddress, aliveAddress);
+}
+
+void initializeHealthMonitoring() {
+  nodeId = readNodeIdFromStorage();
+  refreshHealthAddresses();
+
+  readyState = false;
+  faultState = false;
+
+  setHealthStates(false, false, true);
+
+  uint32_t now = millis();
+  nextHealthAliveDue = now;
+  nextHealthResyncDue = now + HEALTH_RESYNC_INTERVAL_MS;
+}
+
+void tick_health(uint32_t now_ms) {
+  if (readyAddress == 0 || faultAddress == 0 || aliveAddress == 0) return;
+
+  if (isDue(now_ms, nextHealthAliveDue)) {
+    send_feedback(aliveAddress, 1);
+    nextHealthAliveDue = now_ms + HEALTH_ALIVE_INTERVAL_MS;
+  }
+
+  if (isDue(now_ms, nextHealthResyncDue)) {
+    setHealthStates(readyState, faultState, true);
+    nextHealthResyncDue = now_ms + HEALTH_RESYNC_INTERVAL_MS;
+  }
+}
+
+void handleNodeIdUpdate() {
+  nodeId = readNodeIdFromStorage();
+  refreshHealthAddresses();
+  uint32_t now = millis();
+  nextHealthAliveDue = now;
+  nextHealthResyncDue = now;
+  setHealthStates(readyState, faultState, true);
 }
 
 unsigned long intervalForType(uint8_t deviceType) {
@@ -416,6 +538,8 @@ void handleHallState(uint8_t index, uint8_t candidateState, uint16_t analogValue
 void setup() {
   delay(2500);
 
+  nodeId = readNodeIdFromStorage();
+
   uint8_t adrLo = LocoNetSV.readSVStorage(SV_ADDR_CHANGE_ID_L) ;
   uint8_t adrHi = LocoNetSV.readSVStorage(SV_ADDR_CHANGE_ID_H) ;
   uint8_t loconetADR = ((adrHi * 256 + adrLo) * 10);
@@ -433,7 +557,7 @@ void setup() {
   Serial.println(ENGINEER);
   Serial.println();
   Serial.print(F("Indirizzo Loconet: "));
-  Serial.println(loconetADR);
+  Serial.println(nodeId);
   Serial.println();
 
   Wire.begin();
@@ -459,7 +583,8 @@ void setup() {
   LocoNetSV.init(VALUE_MANUFACTURER_ID, VALUE_DEVELOPER_ID, productId, VALUE_SW_VERSION);
   Serial.println(F("- Bus LocoNet avviato correttamente"));
 
-  initLocalVariables() ;
+  initLocalVariables();
+  initializeHealthMonitoring();
 
   // Inizializzo i pin legati alle CV
   configurePinsByType();
@@ -468,6 +593,11 @@ void setup() {
   buildSensorInventory();
   if (!initTofSensors()) {
     failedStart = true;
+  }
+  if (failedStart) {
+    setHealthStates(false, true, true);
+  } else {
+    setHealthStates(true, false, true);
   }
 
   for (uint8_t i = 0; i < SENSOR_COUNT; i++) {
@@ -478,16 +608,6 @@ void setup() {
     sensorConsecutiveOn[i] = 0;
     sensorConsecutiveOff[i] = 0;
   }
-
-  Serial.println();
-  Serial.println(F("* Invia HELP per ottenere l'elenco dei comandi *"));
-  Serial.println();
-
-  if (failedStart) Serial.println(F("Avvio completato con errori"));
-  else Serial.println(F("Avvio completato con successo!"));
-  Serial.println();
-  
-  //vTaskStartScheduler();
 
   // IR receiver
   if (sensorInfo[IR_UNIT_INDEX].deviceType == DEV_SENSORIR && sensorInfo[IR_UNIT_INDEX].isEnabled) {
@@ -500,6 +620,16 @@ void setup() {
     Serial.print(IR_UNIT_IO);
     Serial.println(F(" non configurato come Sensore IR RX o non abilitato"));
   }
+
+  Serial.println();
+  Serial.println(F("* Invia HELP per ottenere l'elenco dei comandi *"));
+  Serial.println();
+
+  if (failedStart) Serial.println(F("Avvio completato con errori"));
+  else Serial.println(F("Avvio completato con successo!"));
+  Serial.println();
+  
+  //vTaskStartScheduler();
 }
 
 void checkSerial () {
@@ -555,7 +685,10 @@ void loop() {
   checkSerial();
 
   // Controllo bus LocoNet
-  checkLocoNet();  
+  checkLocoNet();
+
+  // Gestione diagnostica scheda
+  tick_health(millis());
  
   // Controllo dei sensori
   serviceSensors();
@@ -565,12 +698,7 @@ void loop() {
 }
 
 void initLocalVariables() {
-
-  uint8_t changeLo = LocoNetSV.readSVStorage(SV_ADDR_CHANGE_ID_L) ;
-  uint8_t changeHi = LocoNetSV.readSVStorage(SV_ADDR_CHANGE_ID_H) ;
-  LocoNetSV.writeSVStorage(SV_ADDR_NODE_ID_H, changeHi) ;
-  LocoNetSV.writeSVStorage(SV_ADDR_NODE_ID_L, changeLo) ;
-  
+  nodeId = readNodeIdFromStorage();  
 }
 
 void serviceSensors() {
@@ -578,11 +706,6 @@ void serviceSensors() {
   unsigned long startMicros = micros();
 
   if (failedStart) {
-    static unsigned long nextErrorReport = 0;
-    if (isDue(now, nextErrorReport)) {
-      LocoNet.reportSensor(999, 1);
-      nextErrorReport = now + SENSOR_ERROR_RETRY_MS;
-    }
     return;
   }
 
